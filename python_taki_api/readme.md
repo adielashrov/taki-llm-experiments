@@ -8,6 +8,8 @@ It models a reduced TAKI variant. Supported cards: NUMBER, STOP, CHANGE_COLOR, T
 
 **`PythonAgent`** — a minimal concrete agent that picks the first legal-looking card from its hand. Intended as a placeholder and starting point for custom implementations.
 
+**`TakiStrategyAgent`** — a deterministic heuristic agent that prioritizes profitable TAKI sequences while preserving flexible wildcards until they create real value.
+
 **`TakiGame`** — abstract interface for a game engine. Implement this if you want to run standalone Python episodes outside of BP.
 
 ## Implementing an agent
