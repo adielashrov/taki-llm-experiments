@@ -36,6 +36,11 @@ from bp_taki import (
     NUM_OF_PLAYERS,
 )
 from python_taki_api.python_agent import PythonAgent
+from python_taki_api.taki_strategy_agent_v1 import TakiStrategyAgentV1
+from python_taki_api.taki_strategy_agent_v2 import TakiStrategyAgentV2
+from python_taki_api.taki_strategy_agent_v3 import TakiStrategyAgentV3
+import multiprocessing
+from multiprocessing import Pool
 
 
 @dataclass
@@ -610,7 +615,6 @@ def create_simulation_bprogram(
         bthreads.append(basic_strategy_taki_and_super_taki(0, num_cards))
     elif player_0_strategy == "strategic":
         bthreads.append(strategic_taki_strategy(0, num_cards))
-        bthreads.append(strategy_block_super_taki_during_regular_taki(0))
     elif player_0_strategy != "basic":
         raise ValueError(f"Unknown strategy for player 0: {player_0_strategy}")
     
@@ -625,14 +629,13 @@ def create_simulation_bprogram(
         bthreads.append(basic_strategy_taki_and_super_taki(1, num_cards))
     elif player_1_strategy == "strategic":
         bthreads.append(strategic_taki_strategy(1, num_cards))
-        bthreads.append(strategy_block_super_taki_during_regular_taki(1))
     elif player_1_strategy != "basic":
         raise ValueError(f"Unknown strategy for player 1: {player_1_strategy}")
     
     # Add blocking strategy for player 1 if requested
     if player_1_block_super_taki:
         bthreads.append(strategy_block_super_taki_during_regular_taki(1))
-    
+
     # Create and return the BProgram
     b_program = bp.BProgram(
         bthreads=bthreads,
@@ -975,7 +978,6 @@ def create_simulation_bprogram_basic_vs_strategy(
         bthreads.append(basic_strategy_taki_and_super_taki(0, num_cards))
     elif player_0_strategy == "strategic":
         bthreads.append(strategic_taki_strategy(0, num_cards))
-        bthreads.append(strategy_block_super_taki_during_regular_taki(0))
     elif player_0_strategy != "basic":
         raise ValueError(f"Unknown strategy for player 0: {player_0_strategy}")
 
@@ -1426,10 +1428,10 @@ def save_results(stats: SimulationStats, filename: str = None, player_0_strategy
 
 def run_bp_vs_bp_simulation():
     num_seed_pairs = 10000
-    player_0_strategy = "basic"
-    player_0_block_super_taki = False
+    player_0_strategy = "taki_and_super_taki"
+    player_0_block_super_taki = True
     player_1_strategy = "strategic"
-    player_1_block_super_taki = True
+    player_1_block_super_taki = False
 
     stats = run_simulation(
         num_games=num_seed_pairs,
@@ -1449,8 +1451,8 @@ def run_bp_vs_bp_simulation():
     summary_text = stats.summary(
         player_0_strategy=player_0_strategy,
         player_1_strategy=player_1_strategy,
-        player_0_block_super_taki=(player_0_strategy == "strategic" or player_0_block_super_taki),
-        player_1_block_super_taki=(player_1_strategy == "strategic" or player_1_block_super_taki),
+        player_0_block_super_taki=player_0_block_super_taki,
+        player_1_block_super_taki=player_1_block_super_taki,
     )
     print("\n" + summary_text)
     
@@ -1544,10 +1546,148 @@ def run_bp_vs_strategy_player_simulation():
     json_filename = f"{player_0_label}_vs_{player_1_strategy}_{timestamp}_seeds_test.json"
     save_results(stats, json_filename, player_0_strategy=player_0_strategy, player_1_strategy=player_1_strategy, timestamp=timestamp)
 
+'''
+def run_strategic_vs_heuristics_simulation():
+    num_games = 10000
+    player_0_strategy = "strategic"
+    player_0_block_super_taki = False
+
+    for agent_class, label in [
+        (PythonAgent, "python_random"),
+        (TakiStrategyAgentV1, "heuristic_v1"),
+        (TakiStrategyAgentV2, "heuristic_v2"),
+        (TakiStrategyAgentV3, "heuristic_v3"),
+    ]:
+        print(f"\n{'=' * 60}")
+        print(f"Running: {player_0_strategy} (BP) vs {label} (Python)")
+        print(f"{'=' * 60}")
+
+        stats = run_simulation_basic_vs_strategy(
+            num_games=num_games,
+            start_seed=0,
+            starting_player=-1,
+            balanced_starting_players=True,
+            mirrored_starting_players=False,
+            player_0_strategy=player_0_strategy,
+            player_0_block_super_taki=player_0_block_super_taki,
+            player_1_agent=agent_class(),
+            player_1_strategy_name=label,
+            silent=True,
+            progress_interval=500,
+        )
+
+        summary_text = stats.summary(
+            player_0_strategy=player_0_strategy,
+            player_1_strategy=label,
+            player_0_block_super_taki=player_0_block_super_taki,
+        )
+        print("\n" + summary_text)
+
+        timestamp = datetime.now().strftime("%H-%M_%d-%m-%Y")
+        summary_filename = f"{player_0_strategy}_vs_{label}_{timestamp}_stats_summary.txt"
+        with open(summary_filename, "w") as f:
+            f.write(summary_text)
+        print(f"Summary saved to: {summary_filename}")
+
+        json_filename = f"{player_0_strategy}_vs_{label}_{timestamp}_seeds_test.json"
+        save_results(
+            stats,
+            json_filename,
+            player_0_strategy=player_0_strategy,
+            player_1_strategy=label,
+            timestamp=timestamp,
+        )
+'''
+
+def _run_single_matchup(args):
+    """
+    Top-level function for multiprocessing — runs a full simulation of one
+    BP strategy vs one Python agent matchup and saves results to disk.
+
+    Must be a top-level function (not nested) for multiprocessing pickling.
+    Progress is written to a per-process log file (progress_{label}.log)
+    so it can be monitored live with: tail -f progress_{label}.log
+    """
+    agent_class, label, num_games, player_0_strategy, player_0_block_super_taki = args
+
+    import sys
+    log_filename = f"progress_{label}.log"
+
+    with open(log_filename, "w", buffering=1) as log:  # buffering=1 = line-buffered
+        old_stdout = sys.stdout
+        sys.stdout = log
+
+        try:
+            stats = run_simulation_basic_vs_strategy(
+                num_games=num_games,
+                start_seed=0,
+                starting_player=-1,
+                balanced_starting_players=True,
+                mirrored_starting_players=False,
+                player_0_strategy=player_0_strategy,
+                player_0_block_super_taki=player_0_block_super_taki,
+                player_1_agent=agent_class(),
+                player_1_strategy_name=label,
+                silent=True,
+                progress_interval=500,
+            )
+
+        finally:
+            sys.stdout = old_stdout
+
+    # Build summary
+    summary_text = stats.summary(
+        player_0_strategy=player_0_strategy,
+        player_1_strategy=label,
+        player_0_block_super_taki=player_0_block_super_taki,
+    )
+
+    # Save summary — label in filename guarantees uniqueness across parallel workers
+    timestamp = f"{datetime.now().strftime('%H-%M-%S_%d-%m-%Y')}"
+    summary_filename = f"{player_0_strategy}_vs_{label}_{timestamp}_stats_summary.txt"
+    with open(summary_filename, "w") as f:
+        f.write(summary_text)
+
+    json_filename = f"{player_0_strategy}_vs_{label}_{timestamp}_seeds_test.json"
+    save_results(
+        stats,
+        json_filename,
+        player_0_strategy=player_0_strategy,
+        player_1_strategy=label,
+        timestamp=timestamp,
+    )
+
+    return label, summary_text
+
+def run_strategic_vs_heuristics_simulation():
+    num_games = 10000
+    player_0_strategy = "strategic"
+    player_0_block_super_taki = False
+
+    matchups = [
+        # (PythonAgent,          "python_random",  num_games, player_0_strategy, player_0_block_super_taki),
+        (TakiStrategyAgentV1, "heuristic_v1",   num_games, player_0_strategy, player_0_block_super_taki),
+        (TakiStrategyAgentV2, "heuristic_v2",   num_games, player_0_strategy, player_0_block_super_taki),
+        (TakiStrategyAgentV3, "heuristic_v3",   num_games, player_0_strategy, player_0_block_super_taki),
+    ]
+
+    num_workers = min(len(matchups), multiprocessing.cpu_count())
+    print(f"Running {len(matchups)} matchups in parallel using {num_workers} workers...")
+
+    with Pool(processes=num_workers) as pool:
+        results = pool.map(_run_single_matchup, matchups)
+
+    print("\n" + "=" * 60)
+    print("ALL MATCHUPS COMPLETE")
+    print("=" * 60)
+    for label, summary_text in results:
+        print(f"\n--- {label} ---")
+        print(summary_text)
+        
 
 if __name__ == "__main__":
-    run_bp_vs_bp_simulation()
+    # run_bp_vs_bp_simulation()
     # run_bp_vs_external_player_simulation()
     # run_bp_vs_strategy_player_simulation()
-
+    run_strategic_vs_heuristics_simulation()
     
