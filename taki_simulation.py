@@ -24,6 +24,7 @@ from bp_taki import (
     player_behavior_external,
     basic_strategy_taki,
     basic_strategy_taki_and_super_taki,
+    strategic_taki_strategy,
     block_next_turn_during_open_taki,
     strategy_block_super_taki_during_regular_taki,
     enforce_turns,
@@ -277,7 +278,13 @@ class SimulationStats:
             "second_ci": ci_second,
         }
 
-    def summary(self, player_0_strategy: str = None, player_1_strategy: str = None) -> str:
+    def summary(
+        self,
+        player_0_strategy: str = None,
+        player_1_strategy: str = None,
+        player_0_block_super_taki: bool = False,
+        player_1_block_super_taki: bool = False,
+    ) -> str:
         """Generate a summary string of the statistics."""
         lines = [
             "=" * 60,
@@ -295,6 +302,16 @@ class SimulationStats:
                 lines.append(f"  Player 0: {player_0_strategy}")
             if player_1_strategy is not None:
                 lines.append(f"  Player 1: {player_1_strategy}")
+
+        if player_0_block_super_taki or player_1_block_super_taki:
+            lines.extend([
+                "",
+                "Super TAKI blocking strategy used:",
+            ])
+            if player_0_block_super_taki:
+                lines.append("  Player 0: strategy_block_super_taki_during_regular_taki")
+            if player_1_block_super_taki:
+                lines.append("  Player 1: strategy_block_super_taki_during_regular_taki")
         
         lines.extend([
             "",
@@ -539,9 +556,9 @@ def create_simulation_bprogram(
         Which player goes first (0 or 1). Use -1 for random selection based on seed.
         Cards are dealt to the starting player first to ensure fairness.
     player_0_strategy : str
-        Strategy for player 0: "basic", "taki", "taki_and_super_taki", "block_super_taki"
+        Strategy for player 0: "basic", "taki", "taki_and_super_taki", "strategic"
     player_1_strategy : str
-        Strategy for player 1: "basic", "taki", "taki_and_super_taki", "block_super_taki"
+        Strategy for player 1: "basic", "taki", "taki_and_super_taki", "strategic"
     player_0_block_super_taki : bool
         If True, add strategy_block_super_taki_during_regular_taki for player 0
     player_1_block_super_taki : bool
@@ -591,6 +608,9 @@ def create_simulation_bprogram(
         bthreads.append(basic_strategy_taki(0, num_cards))
     elif player_0_strategy == "taki_and_super_taki":
         bthreads.append(basic_strategy_taki_and_super_taki(0, num_cards))
+    elif player_0_strategy == "strategic":
+        bthreads.append(strategic_taki_strategy(0, num_cards))
+        bthreads.append(strategy_block_super_taki_during_regular_taki(0))
     elif player_0_strategy != "basic":
         raise ValueError(f"Unknown strategy for player 0: {player_0_strategy}")
     
@@ -603,6 +623,9 @@ def create_simulation_bprogram(
         bthreads.append(basic_strategy_taki(1, num_cards))
     elif player_1_strategy == "taki_and_super_taki":
         bthreads.append(basic_strategy_taki_and_super_taki(1, num_cards))
+    elif player_1_strategy == "strategic":
+        bthreads.append(strategic_taki_strategy(1, num_cards))
+        bthreads.append(strategy_block_super_taki_during_regular_taki(1))
     elif player_1_strategy != "basic":
         raise ValueError(f"Unknown strategy for player 1: {player_1_strategy}")
     
@@ -643,7 +666,7 @@ def create_simulation_bprogram_basic_vs_external(
     starting_player : int
         Which player goes first (0 or 1). Use -1 for random selection based on seed.
     player_0_strategy : str
-        Strategy for the BP player (player 0): "basic", "taki", "taki_and_super_taki".
+        Strategy for the BP player (player 0): "basic", "taki", "taki_and_super_taki", "strategic".
     player_0_block_super_taki : bool
         If True, add strategy_block_super_taki_during_regular_taki for player 0.
 
@@ -680,6 +703,9 @@ def create_simulation_bprogram_basic_vs_external(
         bthreads.append(basic_strategy_taki(0, num_cards))
     elif player_0_strategy == "taki_and_super_taki":
         bthreads.append(basic_strategy_taki_and_super_taki(0, num_cards))
+    elif player_0_strategy == "strategic":
+        bthreads.append(strategic_taki_strategy(0, num_cards))
+        bthreads.append(strategy_block_super_taki_during_regular_taki(0))
     elif player_0_strategy != "basic":
         raise ValueError(f"Unknown strategy for player 0: {player_0_strategy}")
 
@@ -909,7 +935,7 @@ def create_simulation_bprogram_basic_vs_strategy(
     starting_player : int
         Which player goes first (0 or 1). Use -1 for random selection based on seed.
     player_0_strategy : str
-        Strategy for the BP player (player 0): "basic", "taki", "taki_and_super_taki".
+        Strategy for the BP player (player 0): "basic", "taki", "taki_and_super_taki", "strategic".
     player_0_block_super_taki : bool
         If True, add strategy_block_super_taki_during_regular_taki for player 0.
     player_1_agent : optional
@@ -947,6 +973,9 @@ def create_simulation_bprogram_basic_vs_strategy(
         bthreads.append(basic_strategy_taki(0, num_cards))
     elif player_0_strategy == "taki_and_super_taki":
         bthreads.append(basic_strategy_taki_and_super_taki(0, num_cards))
+    elif player_0_strategy == "strategic":
+        bthreads.append(strategic_taki_strategy(0, num_cards))
+        bthreads.append(strategy_block_super_taki_during_regular_taki(0))
     elif player_0_strategy != "basic":
         raise ValueError(f"Unknown strategy for player 0: {player_0_strategy}")
 
@@ -1095,7 +1124,7 @@ def run_simulation_basic_vs_strategy(
     )
     total_scheduled_games = len(schedule)
 
-    print(f"Starting simulation of {total_scheduled_games} games (basic BP vs {player_1_strategy_name})...")
+    print(f"Starting simulation of {total_scheduled_games} games ({player_0_strategy} BP vs {player_1_strategy_name})...")
     print(f"Player 0 strategy: {player_0_strategy}" +
           (" + block_super_taki" if player_0_block_super_taki else ""))
     print(f"Player 1 strategy: {player_1_strategy_name}")
@@ -1396,9 +1425,11 @@ def save_results(stats: SimulationStats, filename: str = None, player_0_strategy
 
 
 def run_bp_vs_bp_simulation():
-    num_seed_pairs = 5000
-    player_0_strategy = "taki"
-    player_1_strategy = "basic"
+    num_seed_pairs = 10000
+    player_0_strategy = "basic"
+    player_0_block_super_taki = False
+    player_1_strategy = "strategic"
+    player_1_block_super_taki = True
 
     stats = run_simulation(
         num_games=num_seed_pairs,
@@ -1407,13 +1438,20 @@ def run_bp_vs_bp_simulation():
         balanced_starting_players=True,
         mirrored_starting_players=False,
         player_0_strategy=player_0_strategy,
+        player_0_block_super_taki=player_0_block_super_taki,
         player_1_strategy=player_1_strategy,
+        player_1_block_super_taki=player_1_block_super_taki,
         silent=False,
         progress_interval=500
     )
     
     # Print summary
-    summary_text = stats.summary(player_0_strategy=player_0_strategy, player_1_strategy=player_1_strategy)
+    summary_text = stats.summary(
+        player_0_strategy=player_0_strategy,
+        player_1_strategy=player_1_strategy,
+        player_0_block_super_taki=(player_0_strategy == "strategic" or player_0_block_super_taki),
+        player_1_block_super_taki=(player_1_strategy == "strategic" or player_1_block_super_taki),
+    )
     print("\n" + summary_text)
     
     # Save summary to file with timestamp
@@ -1445,7 +1483,11 @@ def run_bp_vs_external_player_simulation():
     )
 
     # Print summary
-    summary_text = stats.summary(player_0_strategy=player_0_strategy, player_1_strategy=player_1_strategy)
+    summary_text = stats.summary(
+        player_0_strategy=player_0_strategy,
+        player_1_strategy=player_1_strategy,
+        player_0_block_super_taki=False,
+    )
     print("\n" + summary_text)
 
     # Save summary to file with timestamp
@@ -1461,11 +1503,12 @@ def run_bp_vs_external_player_simulation():
 
 def run_bp_vs_strategy_player_simulation():
     num_seed_pairs = 1000
-    # Possible values for player_0_strategy: "basic", "taki", "taki_and_super_taki"
+    # Possible values for player_0_strategy: "basic", "taki", "taki_and_super_taki", "strategic"
     # Also, you can send player_0_block_super_taki=True to add the strategy_block_super_taki_during_regular_taki b-thread for player 0
-    player_0_strategy = "basic"
-    player_0_block_super_taki = False
-    player_1_strategy = "random"
+    player_0_strategy = "strategic"
+    player_0_block_super_taki = True
+    player_1_strategy = "strategic"
+    player_1_block_super_taki = True
 
     stats = run_simulation_basic_vs_strategy(
         num_games=num_seed_pairs,
@@ -1482,7 +1525,11 @@ def run_bp_vs_strategy_player_simulation():
     )
 
     # Print summary
-    summary_text = stats.summary(player_0_strategy=player_0_strategy, player_1_strategy=player_1_strategy)
+    summary_text = stats.summary(
+        player_0_strategy=player_0_strategy,
+        player_1_strategy=player_1_strategy,
+        player_0_block_super_taki=(player_0_strategy == "strategic" or player_0_block_super_taki),
+    )
     print("\n" + summary_text)
 
     # Save summary to file with timestamp
@@ -1499,8 +1546,8 @@ def run_bp_vs_strategy_player_simulation():
 
 
 if __name__ == "__main__":
-    # run_bp_vs_bp_simulation()
+    run_bp_vs_bp_simulation()
     # run_bp_vs_external_player_simulation()
-    run_bp_vs_strategy_player_simulation()
+    # run_bp_vs_strategy_player_simulation()
 
     
