@@ -1,0 +1,45 @@
+============================================================
+TAKI GAME SIMULATION RESULTS
+============================================================
+
+Strategies:
+  Player 0: strategic
+  Player 1: python_random
+
+Total Games Attempted: 10000
+Completed: 10000 | Errors/Incomplete: 0
+
+Player 0 Wins: 6379 ( 63.8%)
+Player 1 Wins: 3621 ( 36.2%)
+
+Draws: 0 | Deadlocks: 0 | Errors: 0
+
+Average Events per Game: 90.1
+
+Starting Player Analysis:
+  Games where P0 started: 5000
+  Games where P1 started: 5000
+  Starting player won: 5381/10000 (53.8%)
+
+Player 0 — Starting Position vs Outcome (2x2):
+
+                 |  P0 Wins | P0 Not Win
+-----------------+----------+------------
+P0 started       |     3380 |       1620
+P0 started second|     2999 |       2001
+
+Player 1 — Starting Position vs Outcome (2x2):
+
+                 |  P1 Wins | P1 Not Win
+-----------------+----------+------------
+P1 started       |     2001 |       2999
+P1 started second|     1620 |       3380
+
+Player 0 — Win Rates with 95% CI:
+  When starting:  67.6% [ 66.3%,  68.9%]
+  When second:   60.0% [ 58.6%,  61.3%]
+
+Player 1 — Win Rates with 95% CI:
+  When starting:  40.0% [ 38.7%,  41.4%]
+  When second:   32.4% [ 31.1%,  33.7%]
+============================================================
