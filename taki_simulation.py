@@ -22,13 +22,14 @@ from bp_taki import (
     deal_cards,
     player_behavior,
     player_behavior_external,
+    adaptive_pressure_strategy,
     basic_strategy_taki,
     basic_strategy_taki_and_super_taki,
     block_next_turn_during_open_taki,
     strategy_block_super_taki_during_regular_taki,
     change_color_strategy,
     most_popular_color_selection_strategy,
-    prefer_stop_over_regular_cards_strategy,
+    prefer_legal_stop_over_regular_cards_strategy,
     enforce_turns,
     enforce_card_placement_rules,
     identify_deadlock,
@@ -44,7 +45,7 @@ from python_taki_api.python_agent import PythonAgent
 @dataclass
 class PlayerStrategyConfig:
     """Configuration for a single player's BP strategies."""
-    base_strategy: str = "basic"  # "basic", "taki", "taki_and_super_taki"
+    base_strategy: str = "basic"  # "basic", "taki", "taki_and_super_taki", "adaptive_pressure"
     block_super_taki: bool = False
     change_color: bool = False
     most_popular_color: bool = False
@@ -546,6 +547,8 @@ def _apply_strategy_config(bthreads: list, index: int, config: PlayerStrategyCon
         bthreads.append(basic_strategy_taki(index, num_cards))
     elif config.base_strategy == "taki_and_super_taki":
         bthreads.append(basic_strategy_taki_and_super_taki(index, num_cards))
+    elif config.base_strategy == "adaptive_pressure":
+        bthreads.append(adaptive_pressure_strategy(index, num_cards))
     elif config.base_strategy != "basic":
         raise ValueError(f"Unknown base_strategy for player {index}: {config.base_strategy}")
 
@@ -557,7 +560,7 @@ def _apply_strategy_config(bthreads: list, index: int, config: PlayerStrategyCon
         bthreads.append(most_popular_color_selection_strategy(index, num_cards))
     if config.prefer_stop:
         for color in COLORS:
-            bthreads.append(prefer_stop_over_regular_cards_strategy(index, color))
+            bthreads.append(prefer_legal_stop_over_regular_cards_strategy(index, color, num_cards))
 
 
 def create_simulation_bprogram(
@@ -1476,18 +1479,18 @@ def run_players_simulation():
     num_seed_pairs = 10000
 
     player_0_config = PlayerStrategyConfig(
-        base_strategy="taki_and_super_taki",
+        base_strategy="adaptive_pressure",
         block_super_taki=True,
         change_color=True,
         most_popular_color=True,
         prefer_stop=True,
     )
     player_1_config = PlayerStrategyConfig(
-        base_strategy="taki_and_super_taki",
-        block_super_taki=True,
-        change_color=True,
-        most_popular_color=True,
-        prefer_stop=True,
+        base_strategy="basic",
+        block_super_taki=False,
+        change_color=False,
+        most_popular_color=False,
+        prefer_stop=False,
     )
 
     stats = run_simulation(

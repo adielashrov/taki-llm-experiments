@@ -693,6 +693,70 @@ def prefer_stop_over_regular_cards_strategy(index, color):
                     num_of_stops_in_color += 1
 
 
+def _is_stop_legal_now(color: str, state: Dict[str, Any]) -> bool:
+    if state["rule_mode"] == "taki":
+        return False
+    if state["rule_mode"] == "color_only":
+        return state["active_color"] == color
+    return state["active_color"] == color or state["top_type"] == "STOP"
+
+
+@bp.thread
+def prefer_legal_stop_over_regular_cards_strategy(index, color, num_of_cards=2):
+    """
+    Improved Stop preference strategy.
+
+    Unlike prefer_stop_over_regular_cards_strategy, this b-thread blocks
+    same-color regular cards only when the corresponding stop_{color} is both
+    in hand and currently legal under the active placement rules.
+    """
+    num_of_stops_in_color = 0
+    state = {
+        "active_color": None,
+        "top_type": None,
+        "rule_mode": "match_color_or_type",
+        "taki_color": None,
+        "last_taki_color": None,
+        "last_taki_type": None,
+    }
+
+    yield bp.sync(waitFor=BPEvent("start_dealing_cards_to_players", priority=10.0))
+
+    for _ in range(num_of_cards):
+        yield bp.sync(waitFor=BPEvent(f"deal_cards_to_player_{index}", priority=10.0))
+        deal_card_event = yield bp.sync(waitFor=DealCardsEventSet())
+        if deal_card_event.name == f"deal_p_stop_{color}":
+            num_of_stops_in_color += 1
+
+    yield bp.sync(waitFor=BPEvent("deal_leading_card", priority=10.0))
+    leading_event = yield bp.sync(waitFor=leading_card_event_set)
+    leading_color, leading_type = extract_card_color_and_type(leading_event)
+    state["active_color"] = leading_color
+    state["top_type"] = leading_type
+    yield bp.sync(waitFor=BPEvent("finished_leading_card", priority=10.0))
+    yield bp.sync(waitFor=BPEvent("start_game", priority=10.0))
+
+    while True:
+        should_block = num_of_stops_in_color > 0 and _is_stop_legal_now(color, state)
+        last_event = yield bp.sync(
+            waitFor=bp.All(),
+            block=AllRegularCardsOfIndexAndColor(index, color) if should_block else None,
+        )
+
+        if is_no_more_cards_event(last_event):
+            break
+
+        if last_event.name == f"p_{index}_stop_{color}":
+            num_of_stops_in_color -= 1
+        elif last_event.name == f"deal_cards_to_player_{index}":
+            dealt_event = yield bp.sync(waitFor=DealCardsEventSet())
+            if dealt_event.name == f"deal_p_stop_{color}":
+                num_of_stops_in_color += 1
+            continue
+
+        _update_adaptive_strategy_state(state, last_event)
+
+
 @bp.thread
 def change_color_strategy(index, num_of_cards=2):
     yield bp.sync(waitFor=BPEvent(f"start_dealing_cards_to_players", priority=10.0))
@@ -810,6 +874,390 @@ def most_popular_color_selection_strategy(index, num_of_cards=2):
 
         elif is_no_more_cards_event(card_event):
             break
+
+
+def _iter_hand_without_one(card_events: list[BPEvent], excluded_event: Optional[BPEvent]):
+    skipped = excluded_event is None
+    for event in card_events:
+        if not skipped and event == excluded_event:
+            skipped = True
+            continue
+        yield event
+
+
+def _count_real_hand_cards(card_events: list[BPEvent]) -> int:
+    return sum(1 for event in card_events if not event.name.endswith("_closed_taki"))
+
+
+def _count_colored_cards_by_color(card_events: list[BPEvent]) -> Dict[str, int]:
+    counts = {color: 0 for color in COLORS}
+    for event in card_events:
+        if event.name.endswith("_closed_taki"):
+            continue
+        color, _ = extract_card_color_and_type(event)
+        if color in counts:
+            counts[color] += 1
+    return counts
+
+
+def _choose_best_change_color(card_events: list[BPEvent]) -> str:
+    best_color = COLORS[0]
+    best_score = float("-inf")
+
+    for color in COLORS:
+        score = 0
+        for event in card_events:
+            if event.name.endswith("_closed_taki"):
+                continue
+            event_color, event_type = extract_card_color_and_type(event)
+            if event_color != color:
+                continue
+            score += 10
+            if event_type == "TAKI":
+                score += 3
+            elif event_type == "STOP":
+                score += 2
+            elif event_type in {"1", "3", "4", "5"}:
+                score += 1
+
+        if score > best_score:
+            best_score = score
+            best_color = color
+
+    return best_color
+
+
+def _count_same_color_cards(card_events: list[BPEvent], color: Optional[str], excluded_event: Optional[BPEvent] = None) -> int:
+    if color not in COLORS:
+        return 0
+
+    count = 0
+    for event in _iter_hand_without_one(card_events, excluded_event):
+        if event.name.endswith("_closed_taki"):
+            continue
+        event_color, _ = extract_card_color_and_type(event)
+        if event_color == color:
+            count += 1
+    return count
+
+
+def _count_followups_after_regular(card_events: list[BPEvent], regular_event: BPEvent) -> int:
+    color, card_type = extract_card_color_and_type(regular_event)
+    count = 0
+
+    for event in _iter_hand_without_one(card_events, regular_event):
+        if event.name.endswith("_closed_taki"):
+            continue
+        if is_change_color_event(event) or is_super_taki_event(event):
+            count += 1
+            continue
+
+        event_color, event_type = extract_card_color_and_type(event)
+        if event_color == color or event_type == card_type:
+            count += 1
+
+    return count
+
+
+def _count_followups_after_stop(card_events: list[BPEvent], stop_event: BPEvent) -> int:
+    color, _ = extract_card_color_and_type(stop_event)
+    count = 0
+
+    for event in _iter_hand_without_one(card_events, stop_event):
+        if event.name.endswith("_closed_taki"):
+            continue
+        if is_change_color_event(event) or is_super_taki_event(event) or is_stop_card_event(event):
+            count += 1
+            continue
+
+        event_color, _ = extract_card_color_and_type(event)
+        if event_color == color:
+            count += 1
+
+    return count
+
+
+def _build_adaptive_turn_requests(card_events: list[BPEvent], active_color: Optional[str]) -> list[BPEvent]:
+    hand_size = _count_real_hand_cards(card_events)
+    color_counts = _count_colored_cards_by_color(card_events)
+    dominant_color = max(COLORS, key=lambda color: color_counts[color])
+    dominant_count = color_counts[dominant_color]
+    requests = []
+
+    for event in card_events:
+        if event.name.endswith("_closed_taki"):
+            continue
+
+        priority = 10.0
+
+        if hand_size == 1:
+            priority = 3.0
+        elif is_taki_card_event(event):
+            color, _ = extract_card_color_and_type(event)
+            same_color_count = _count_same_color_cards(card_events, color, excluded_event=event)
+            if same_color_count >= 3:
+                priority = 4.0
+            elif same_color_count == 2:
+                priority = 4.5
+            elif same_color_count == 1:
+                priority = 6.0
+            else:
+                priority = 7.5
+        elif is_stop_card_event(event):
+            followups = _count_followups_after_stop(card_events, event)
+            if followups >= 3:
+                priority = 5.0
+            elif followups == 2:
+                priority = 5.8
+            elif followups == 1:
+                priority = 7.0
+            else:
+                priority = 8.8
+        elif is_super_taki_event(event):
+            continuation = _count_same_color_cards(card_events, active_color, excluded_event=event)
+            if continuation >= 3:
+                priority = 5.2
+            elif continuation == 2:
+                priority = 6.0
+            elif continuation == 1:
+                priority = 7.2
+            else:
+                priority = 9.0
+        elif is_change_color_event(event):
+            if dominant_count >= 4:
+                priority = 8.9
+            elif dominant_count == 3 and hand_size <= 4:
+                priority = 9.4
+            else:
+                priority = 10.8
+        elif is_regular_card_event(event):
+            followups = _count_followups_after_regular(card_events, event)
+            color, _ = extract_card_color_and_type(event)
+            if followups >= 3:
+                priority = 8.0
+            elif followups == 2:
+                priority = 8.8
+            elif color == dominant_color and dominant_count >= 2:
+                priority = 9.1
+            elif followups == 1:
+                priority = 9.4
+            else:
+                priority = 10.0
+
+        requests.append(BPEvent(event.name, priority=priority))
+
+    return requests
+
+
+def _build_adaptive_taki_requests(card_events: list[BPEvent], taki_color: Optional[str]) -> list[BPEvent]:
+    same_color_cards = []
+    has_super_taki = False
+
+    for event in card_events:
+        if event.name.endswith("_closed_taki"):
+            continue
+        if is_super_taki_event(event):
+            has_super_taki = True
+            continue
+        color, _ = extract_card_color_and_type(event)
+        if color == taki_color:
+            same_color_cards.append(event)
+
+    requests = []
+    can_finish_with_super_taki = has_super_taki and _count_real_hand_cards(card_events) == 1
+
+    for event in card_events:
+        if event.name.endswith("_closed_taki"):
+            closed_priority = 14.0 if (not same_color_cards and not can_finish_with_super_taki) else 15.0
+            requests.append(BPEvent(event.name, priority=closed_priority))
+            continue
+
+        priority = 12.0
+        if is_super_taki_event(event):
+            if can_finish_with_super_taki:
+                priority = 4.0
+            elif same_color_cards:
+                priority = 13.0
+            else:
+                priority = 16.0
+        else:
+            color, card_type = extract_card_color_and_type(event)
+            if color == taki_color:
+                if card_type == "STOP":
+                    priority = 4.0
+                elif card_type == "TAKI":
+                    priority = 4.3
+                else:
+                    priority = 4.1
+
+        requests.append(BPEvent(event.name, priority=priority))
+
+    return requests
+
+
+def _update_adaptive_strategy_state(state: Dict[str, Any], event: BPEvent):
+    if not isinstance(event, BPEvent):
+        return
+
+    if event.name == "done_post_action":
+        if state["rule_mode"] == "taki":
+            state["active_color"] = state["last_taki_color"]
+            state["top_type"] = state["last_taki_type"]
+            state["rule_mode"] = "match_color_or_type"
+            state["taki_color"] = None
+        return
+
+    if event.name.endswith("_closed_taki"):
+        return
+
+    if is_selected_color_event(event):
+        color, _ = extract_card_color_and_type(event)
+        state["active_color"] = color
+        state["top_type"] = "CHANGE_COLOR"
+        state["rule_mode"] = "color_only"
+        return
+
+    if is_regular_card_event(event) or is_stop_card_event(event):
+        color, card_type = extract_card_color_and_type(event)
+        state["active_color"] = color
+        state["top_type"] = card_type
+        if state["rule_mode"] == "taki":
+            state["last_taki_color"] = color
+            state["last_taki_type"] = card_type
+        else:
+            state["rule_mode"] = "match_color_or_type"
+        return
+
+    if is_change_color_event(event):
+        state["top_type"] = "CHANGE_COLOR"
+        state["rule_mode"] = "color_only"
+        return
+
+    if is_taki_card_event(event):
+        color, _ = extract_card_color_and_type(event)
+        state["active_color"] = color
+        state["top_type"] = "TAKI"
+        state["rule_mode"] = "taki"
+        state["taki_color"] = color
+        state["last_taki_color"] = color
+        state["last_taki_type"] = "TAKI"
+        return
+
+    if is_super_taki_event(event):
+        inherited_color = state["active_color"]
+        state["top_type"] = "SUPER_TAKI"
+        state["rule_mode"] = "taki"
+        state["taki_color"] = inherited_color
+        state["last_taki_color"] = inherited_color
+        state["last_taki_type"] = "SUPER_TAKI"
+
+
+@bp.thread
+def adaptive_pressure_strategy(index, num_of_cards=2):
+    """
+    Adaptive strategy that reprioritizes cards based on how much tempo or
+    follow-through they create from the current hand.
+
+    Principles:
+    - Prefer regular TAKI when it can dump multiple same-color cards.
+    - Prefer STOP when it likely converts into a productive extra turn.
+    - Keep change_color as a pivot, usually after stronger tempo options.
+    - Preserve super_taki inside TAKI runs unless spending it immediately wins.
+    """
+    card_events = []
+    deal_player_cards_event_set = DealCardsEventSet()
+    state = {
+        "active_color": None,
+        "top_type": None,
+        "rule_mode": "match_color_or_type",
+        "taki_color": None,
+        "last_taki_color": None,
+        "last_taki_type": None,
+    }
+
+    yield bp.sync(waitFor=BPEvent("start_dealing_cards_to_players", priority=10.0))
+
+    for _ in range(num_of_cards):
+        yield bp.sync(waitFor=BPEvent(f"deal_cards_to_player_{index}", priority=10.0))
+        deal_card_event = yield bp.sync(waitFor=deal_player_cards_event_set)
+        card_name = remove_deal_prefix_and_add_player_index(deal_card_event, index)
+        card_events.append(BPEvent(card_name, priority=deal_card_event.priority))
+
+    yield bp.sync(waitFor=BPEvent("deal_leading_card", priority=10.0))
+    leading_event = yield bp.sync(waitFor=leading_card_event_set)
+    leading_color, leading_type = extract_card_color_and_type(leading_event)
+    state["active_color"] = leading_color
+    state["top_type"] = leading_type
+    yield bp.sync(waitFor=BPEvent("finished_leading_card", priority=10.0))
+    yield bp.sync(waitFor=BPEvent("start_game", priority=10.0))
+
+    draw_card_event = BPEvent(f"p_{index}_draw_card", priority=20.0)
+    no_more_cards_event = BPEvent(f"p_{index}_no_more_cards", priority=8.0)
+
+    while True:
+        request_events = _build_adaptive_turn_requests(card_events, state["active_color"])
+        observed_event = yield bp.sync(
+            request=request_events if request_events else None,
+            waitFor=bp.All(),
+        )
+
+        if observed_event == no_more_cards_event:
+            break
+
+        if observed_event == draw_card_event:
+            yield bp.sync(waitFor=BPEvent(f"deal_cards_to_player_{index}", priority=10.0))
+            deal_card_event = yield bp.sync(waitFor=deal_player_cards_event_set)
+            card_name = remove_deal_prefix_and_add_player_index(deal_card_event, index)
+            card_events.append(BPEvent(card_name, priority=deal_card_event.priority))
+            continue
+
+        if observed_event in request_events:
+            _update_adaptive_strategy_state(state, observed_event)
+
+            if is_regular_card_event(observed_event):
+                card_events.remove(observed_event)
+                continue
+
+            if is_change_color_event(observed_event):
+                card_events.remove(observed_event)
+                best_color = _choose_best_change_color(card_events)
+                selected_event = BPEvent(f"selected_{best_color}", priority=5.0)
+                other_color_events = [
+                    BPEvent(f"selected_{color}", priority=5.0)
+                    for color in COLORS
+                    if color != best_color
+                ]
+                selected_color_event = yield bp.sync(request=selected_event, block=other_color_events)
+                _update_adaptive_strategy_state(state, selected_color_event)
+                done_event = yield bp.sync(waitFor=BPEvent("done_post_action", priority=10.0))
+                _update_adaptive_strategy_state(state, done_event)
+                continue
+
+            if is_stop_card_event(observed_event):
+                card_events.remove(observed_event)
+                done_event = yield bp.sync(waitFor=BPEvent("done_post_action", priority=10.0))
+                _update_adaptive_strategy_state(state, done_event)
+                continue
+
+            if is_any_taki_event(observed_event):
+                card_events.remove(observed_event)
+                closed_taki_event = BPEvent(f"p_{index}_closed_taki", priority=15.0)
+                card_events.append(closed_taki_event)
+
+                while True:
+                    taki_requests = _build_adaptive_taki_requests(card_events, state["taki_color"])
+                    taki_event = yield bp.sync(request=taki_requests)
+                    if taki_event.name != f"p_{index}_closed_taki":
+                        _update_adaptive_strategy_state(state, taki_event)
+                    card_events.remove(taki_event)
+                    if taki_event.name == f"p_{index}_closed_taki":
+                        break
+
+                done_event = yield bp.sync(waitFor=BPEvent("done_post_action", priority=10.0))
+                _update_adaptive_strategy_state(state, done_event)
+                continue
+
+        _update_adaptive_strategy_state(state, observed_event)
 
 
 def is_selected_color_event(event: BPEvent) -> bool:
@@ -1740,13 +2188,20 @@ def init_b_program(starting_player=1):
         deal_cards(2, NUM_OF_CARDS, starting_player),
         player_behavior(0, NUM_OF_CARDS),
         player_behavior(1, NUM_OF_CARDS),
+        basic_strategy_taki_and_super_taki(0, NUM_OF_CARDS),
+        strategy_block_super_taki_during_regular_taki(0),
         change_color_strategy(0, NUM_OF_CARDS),
         most_popular_color_selection_strategy(0, NUM_OF_CARDS),
+        prefer_legal_stop_over_regular_cards_strategy(0, "red", NUM_OF_CARDS),
+        prefer_legal_stop_over_regular_cards_strategy(0, "blue", NUM_OF_CARDS),
+        prefer_legal_stop_over_regular_cards_strategy(0, "green", NUM_OF_CARDS),
+        basic_strategy_taki_and_super_taki(1, NUM_OF_CARDS),
+        strategy_block_super_taki_during_regular_taki(1),
         change_color_strategy(1, NUM_OF_CARDS),
-        prefer_stop_over_regular_cards_strategy(1, "red"),
-        prefer_stop_over_regular_cards_strategy(1, "blue"),
-        prefer_stop_over_regular_cards_strategy(1, "green"),
         most_popular_color_selection_strategy(1, NUM_OF_CARDS),
+        prefer_legal_stop_over_regular_cards_strategy(1, "red", NUM_OF_CARDS),
+        prefer_legal_stop_over_regular_cards_strategy(1, "blue", NUM_OF_CARDS),
+        prefer_legal_stop_over_regular_cards_strategy(1, "green", NUM_OF_CARDS),
         # player_behavior_external(1, NUM_OF_CARDS, starting_player, NUM_OF_PLAYERS, PythonAgent(seed=SEED)),
         # basic_strategy_taki(0, NUM_OF_CARDS),
         block_next_turn_during_open_taki(0),
