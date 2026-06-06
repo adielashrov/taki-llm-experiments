@@ -29,6 +29,8 @@ from bp_taki import (
     change_color_strategy,
     most_popular_color_selection_strategy,
     prefer_stop_over_regular_cards_strategy,
+    color_density_card_strategy,
+    preserve_wildcards_when_colored_card_available,
     enforce_turns,
     enforce_card_placement_rules,
     identify_deadlock,
@@ -49,6 +51,8 @@ class PlayerStrategyConfig:
     change_color: bool = False
     most_popular_color: bool = False
     prefer_stop: bool = False
+    color_density: bool = False
+    preserve_wildcards: bool = False
 
     def label(self) -> str:
         parts = [self.base_strategy]
@@ -60,6 +64,10 @@ class PlayerStrategyConfig:
             parts.append("most_popular_color")
         if self.prefer_stop:
             parts.append("prefer_stop")
+        if self.color_density:
+            parts.append("color_density")
+        if self.preserve_wildcards:
+            parts.append("preserve_wildcards")
         return "+".join(parts)
 
 
@@ -558,6 +566,10 @@ def _apply_strategy_config(bthreads: list, index: int, config: PlayerStrategyCon
     if config.prefer_stop:
         for color in COLORS:
             bthreads.append(prefer_stop_over_regular_cards_strategy(index, color))
+    if config.color_density:
+        bthreads.append(color_density_card_strategy(index, num_cards))
+    if config.preserve_wildcards:
+        bthreads.append(preserve_wildcards_when_colored_card_available(index, num_cards))
 
 
 def create_simulation_bprogram(
@@ -1480,14 +1492,19 @@ def run_players_simulation():
         block_super_taki=True,
         change_color=True,
         most_popular_color=True,
-        prefer_stop=True,
+        prefer_stop=False,
+        color_density=True,
+        preserve_wildcards=True,
     )
+    
     player_1_config = PlayerStrategyConfig(
-        base_strategy="taki_and_super_taki",
-        block_super_taki=True,
-        change_color=True,
-        most_popular_color=True,
-        prefer_stop=True,
+        base_strategy="basic",
+        block_super_taki=False,
+        change_color=False,
+        most_popular_color=False,
+        prefer_stop=False,
+        color_density=False,
+        preserve_wildcards=False,
     )
 
     stats = run_simulation(
