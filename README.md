@@ -1,8 +1,8 @@
 # taki-llm-experiments
 
 This repository provides the replication package for the experiments presented
-in the paper "From Domain Knowledge to Composable Reactive Code:
-LLM-Assisted Development with Scenario-Based Programming", currently under
+in the paper *"From Domain Knowledge to Composable Reactive Code:
+LLM-Assisted Development with Scenario-Based Programming"*, currently under
 review for ICECCS 2026.
 
 It contains the code versions, experimental configurations, prompts, generated
