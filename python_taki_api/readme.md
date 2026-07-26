@@ -1,14 +1,19 @@
-This package provides the interface for implementing a TAKI-playing agent that integrates with the BP-TAKI bridge.
+# python_taki_api
 
-It models a reduced TAKI variant. Supported cards: NUMBER, STOP, CHANGE_COLOR, TAKI, SUPER_TAKI.
+This package provides the Python player interface referenced in the paper
+(Table 1, `Python player interface`) for implementing a TAKI-playing agent
+that integrates with the BP-TAKI bridge. It models a reduced TAKI variant.
+Supported cards: NUMBER, STOP, CHANGE_COLOR, TAKI, SUPER_TAKI.
 
 ## Key classes
 
-**`TakiAgent`** — abstract base class for all agents. Implement `get_action` to create your own agent.
-
-**`PythonAgent`** — a minimal concrete agent that picks the first legal-looking card from its hand. Intended as a placeholder and starting point for custom implementations.
-
-**`TakiGame`** — abstract interface for a game engine. Implement this if you want to run standalone Python episodes outside of BP.
+- **`TakiAgent`** — abstract base class for all agents. Implement `get_action`
+  to create your own agent.
+- **`PythonAgent`** — a minimal concrete agent that picks the first
+  legal-looking card from its hand. Intended as a placeholder and starting
+  point for custom implementations.
+- **`TakiGame`** — abstract interface for a game engine. Implement this if
+  you want to run standalone Python episodes outside of BP.
 
 ## Implementing an agent
 
@@ -48,3 +53,9 @@ class MyAgent(TakiAgent):
 | Draw card | `draw_card` | |
 | Close TAKI | `closed_taki` | |
 | Select color | `selected_{color}` | `selected_blue` |
+
+## Reproducing the paper's experiments
+
+This file documents the agent interface only. For instructions on
+reproducing the experiments reported in the paper, see the top-level
+[README](../README.md).
