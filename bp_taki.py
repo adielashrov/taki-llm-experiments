@@ -1333,6 +1333,77 @@ def _is_legal_non_wild_colored_card(card_event, rule_mode, active_color, active_
     return False
 
 
+def _is_legal_regular_card(card_event, rule_mode, active_color, active_type):
+    if not is_regular_card_event(card_event):
+        return False
+    return _is_legal_non_wild_colored_card(card_event, rule_mode, active_color, active_type)
+
+
+def _is_legal_tactical_card(card_event, rule_mode, active_color, active_type, in_taki_sequence=False):
+    if in_taki_sequence:
+        return is_stop_card_event(card_event) or is_taki_card_event(card_event)
+
+    if is_stop_card_event(card_event) or is_taki_card_event(card_event):
+        return _is_legal_non_wild_colored_card(card_event, rule_mode, active_color, active_type)
+
+    return False
+
+
+def _popular_color_regular_card_requests(
+    card_events,
+    rule_mode,
+    active_color,
+    active_type,
+    in_taki_sequence=False,
+    min_remaining_same_color_after_play=1,
+    preferred_priority=9.8,
+):
+    """
+    Return weak priority requests for regular cards from the hand's densest color.
+
+    The strategy intentionally stays silent when a legal Stop or TAKI card exists.
+    This keeps the popular-color preference as a tie-breaker among regular
+    numbered cards and as a mild wildcard-preservation rule, instead of a
+    global replacement for stronger action choices.
+    """
+    if in_taki_sequence:
+        return []
+
+    legal_regular_cards = [
+        event
+        for event in card_events
+        if _is_legal_regular_card(event, rule_mode, active_color, active_type)
+    ]
+    if not legal_regular_cards:
+        return []
+
+    legal_tactical_cards = [
+        event
+        for event in card_events
+        if _is_legal_tactical_card(event, rule_mode, active_color, active_type, in_taki_sequence)
+    ]
+    if legal_tactical_cards:
+        return []
+
+    color_counts = _card_color_counts(card_events)
+    max_color_count = max(color_counts.values()) if color_counts else 0
+    if max_color_count <= 0:
+        return []
+
+    preferred_events = []
+    for event in legal_regular_cards:
+        card_color, _ = extract_card_color_and_type(event)
+        if card_color not in color_counts:
+            continue
+        if color_counts[card_color] != max_color_count:
+            continue
+        if color_counts[card_color] - 1 < min_remaining_same_color_after_play:
+            continue
+        preferred_events.append(BPEvent(event.name, data=event.data, priority=preferred_priority))
+
+    return preferred_events
+
+
 def _wildcards_to_preserve(index, card_events, rule_mode, active_color, active_type, in_taki_sequence):
     if in_taki_sequence:
         return []
@@ -1353,6 +1424,140 @@ def _wildcards_to_preserve(index, card_events, rule_mode, active_color, active_t
 def _add_dealt_card_to_strategy_hand(card_events, deal_card_event, index):
     card_name = remove_deal_prefix_and_add_player_index(deal_card_event, index)
     card_events.append(BPEvent(card_name, priority=deal_card_event.priority))
+
+
+@bp.thread
+def prefer_popular_color_regular_cards_strategy(index, num_of_cards=2):
+    """
+    Prefer legal regular cards from the player's densest color within a full
+    tactical priority hierarchy.
+
+    TAKI and Stop cards still outrank regular cards. Change Color and Super
+    TAKI are delayed when colored cards are available. This makes the popular
+    regular-card preference assist the player without suppressing stronger
+    tactical choices.
+    """
+    card_events = []
+    deal_player_cards_event_set = DealCardsEventSet()
+
+    yield bp.sync(waitFor=BPEvent("start_dealing_cards_to_players", priority=10.0))
+
+    for _ in range(num_of_cards):
+        yield bp.sync(waitFor=BPEvent(f"deal_cards_to_player_{index}", priority=10.0))
+        deal_card_event = yield bp.sync(waitFor=deal_player_cards_event_set)
+        _add_dealt_card_to_strategy_hand(card_events, deal_card_event, index)
+
+    yield bp.sync(waitFor=BPEvent("deal_leading_card", priority=10.0))
+    leading_event = yield bp.sync(waitFor=leading_card_event_set)
+    yield bp.sync(waitFor=BPEvent("finished_leading_card", priority=10.0))
+    yield bp.sync(waitFor=BPEvent("start_game", priority=10.0))
+
+    active_color, active_type = extract_card_color_and_type(leading_event)
+    rule_mode = "match_color_or_type"
+    in_taki_sequence = False
+    last_taki_color = None
+    last_taki_type = None
+
+    draw_card_event = BPEvent(f"p_{index}_draw_card", priority=20.0)
+    no_more_cards_event = BPEvent(f"p_{index}_no_more_cards", priority=8.0)
+    next_turn_event = BPEvent("next_turn", priority=10.0)
+    end_game_event = BPEvent("end_game", priority=10.0)
+
+    observed_events = bp.EventSetList([
+        general_player_event_set,
+        bp.EventSet(is_selected_color_event),
+    ])
+
+    while True:
+        requested_events = _prioritized_color_density_events(card_events, in_taki_sequence)
+
+        last_event = yield bp.sync(request=requested_events, waitFor=observed_events)
+
+        if last_event.name == "end_game" or is_no_more_cards_event(last_event):
+            break
+
+        event_player_id = get_player_id(last_event.name)
+        own_event = event_player_id == index
+
+        if is_selected_color_event(last_event):
+            active_color, _ = extract_card_color_and_type(last_event)
+            active_type = "CHANGE_COLOR"
+            rule_mode = "color_only"
+            continue
+
+        if is_draw_card_event(last_event) and own_event:
+            yield bp.sync(waitFor=BPEvent(f"deal_cards_to_player_{index}", priority=10.0))
+            deal_card_event = yield bp.sync(waitFor=deal_player_cards_event_set)
+            _add_dealt_card_to_strategy_hand(card_events, deal_card_event, index)
+
+            boundary_event = yield bp.sync(waitFor=[no_more_cards_event, next_turn_event, end_game_event])
+            if boundary_event.name == "end_game" or is_no_more_cards_event(boundary_event):
+                break
+            continue
+
+        if own_event and (is_regular_card_event(last_event) or is_action_card_event(last_event)):
+            _remove_card_event_from_hand(card_events, last_event)
+
+        if is_regular_card_event(last_event) or is_stop_card_event(last_event):
+            active_color, active_type = extract_card_color_and_type(last_event)
+            rule_mode = "match_color_or_type"
+
+        elif is_change_color_event(last_event):
+            selected_color_event = yield bp.sync(
+                waitFor=[BPEvent(f"selected_{c}", priority=5.0) for c in COLORS]
+            )
+            active_color, _ = extract_card_color_and_type(selected_color_event)
+            active_type = "CHANGE_COLOR"
+            rule_mode = "color_only"
+
+            if own_event:
+                yield bp.sync(waitFor=BPEvent("done_post_action", priority=10.0))
+
+        elif is_any_taki_event(last_event):
+            if is_taki_card_event(last_event):
+                active_color, active_type = extract_card_color_and_type(last_event)
+            else:
+                _, active_type = extract_card_color_and_type(last_event)
+
+            last_taki_color = active_color
+            last_taki_type = active_type
+            rule_mode = "taki"
+            in_taki_sequence = True
+
+            taki_wait_events = bp.EventSetList([
+                general_player_event_set,
+                BPEvent("done_post_action", priority=10.0),
+            ])
+            while True:
+                taki_event = yield bp.sync(waitFor=taki_wait_events)
+
+                if taki_event.name == "end_game":
+                    return
+
+                if taki_event.name == "done_post_action":
+                    active_color = last_taki_color
+                    active_type = last_taki_type
+                    rule_mode = "match_color_or_type"
+                    in_taki_sequence = False
+                    break
+
+                if get_player_id(taki_event.name) == index and (
+                    is_regular_card_event(taki_event) or is_action_card_event(taki_event)
+                ):
+                    _remove_card_event_from_hand(card_events, taki_event)
+
+                if taki_event.name.endswith("_closed_taki"):
+                    continue
+
+                if is_super_taki_event(taki_event):
+                    _, last_taki_type = extract_card_color_and_type(taki_event)
+                elif is_regular_card_event(taki_event) or is_stop_card_event(taki_event) or is_taki_card_event(taki_event):
+                    last_taki_color, last_taki_type = extract_card_color_and_type(taki_event)
+
+        if own_event:
+            boundary_event = yield bp.sync(waitFor=[no_more_cards_event, next_turn_event, end_game_event])
+            if boundary_event.name == "end_game" or is_no_more_cards_event(boundary_event):
+                break
 
 
 @bp.thread

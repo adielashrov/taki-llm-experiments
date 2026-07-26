@@ -9,7 +9,9 @@ import bppy as bp
 import random
 import logging
 import math
-from typing import Dict, List, Tuple, Optional
+import re
+from collections import Counter
+from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime
 from dataclasses import dataclass, field
 import json
@@ -29,6 +31,7 @@ from bp_taki import (
     change_color_strategy,
     most_popular_color_selection_strategy,
     prefer_stop_over_regular_cards_strategy,
+    prefer_popular_color_regular_cards_strategy,
     color_density_card_strategy,
     preserve_wildcards_when_colored_card_available,
     enforce_turns,
@@ -43,6 +46,75 @@ from bp_taki import (
 from python_taki_api.python_agent import PythonAgent
 
 
+PLAYER_CARD_RE = re.compile(
+    r"^p_(\d+)_(card_\d+_\w+|stop_\w+|plus_2_\w+|taki_\w+|change_color|super_taki)$"
+)
+DEAL_TO_PLAYER_RE = re.compile(r"^deal_cards_to_player_(\d+)$")
+
+
+def _empty_color_counts() -> Dict[str, int]:
+    return {color: 0 for color in COLORS}
+
+
+def _card_type(card_name: str) -> str:
+    if card_name.startswith("card_"):
+        return "regular"
+    if card_name.startswith("stop_"):
+        return "stop"
+    if card_name.startswith("plus_2_"):
+        return "plus_2"
+    if card_name.startswith("taki_"):
+        return "taki"
+    if card_name == "super_taki":
+        return "super_taki"
+    if card_name == "change_color":
+        return "change_color"
+    return "unknown"
+
+
+def _card_color(card_name: str) -> Optional[str]:
+    for color in COLORS:
+        if card_name.endswith(f"_{color}"):
+            return color
+    return None
+
+
+def summarize_card_composition(cards: List[str]) -> Dict[str, Any]:
+    """Return compact composition features for a hand."""
+    type_counts = Counter(_card_type(card) for card in cards)
+    color_counts = _empty_color_counts()
+
+    for card in cards:
+        color = _card_color(card)
+        if color in color_counts:
+            color_counts[color] += 1
+
+    regular_taki_cards = type_counts["taki"]
+    super_taki_cards = type_counts["super_taki"]
+    change_color_cards = type_counts["change_color"]
+    wildcard_cards = super_taki_cards + change_color_cards
+    taki_cards = regular_taki_cards + super_taki_cards
+
+    return {
+        "total_cards": len(cards),
+        "type_counts": dict(type_counts),
+        "color_counts": color_counts,
+        "regular_cards": type_counts["regular"],
+        "stop_cards": type_counts["stop"],
+        "plus_2_cards": type_counts["plus_2"],
+        "regular_taki_cards": regular_taki_cards,
+        "super_taki_cards": super_taki_cards,
+        "taki_cards": taki_cards,
+        "change_color_cards": change_color_cards,
+        "wildcard_cards": wildcard_cards,
+        "has_taki": taki_cards > 0,
+        "has_regular_taki": regular_taki_cards > 0,
+        "has_super_taki": super_taki_cards > 0,
+        "has_change_color": change_color_cards > 0,
+        "has_multiple_change_color": change_color_cards >= 2,
+    }
+
+
 @dataclass
 class PlayerStrategyConfig:
     """Configuration for a single player's BP strategies."""
@@ -51,6 +123,7 @@ class PlayerStrategyConfig:
     change_color: bool = False
     most_popular_color: bool = False
     prefer_stop: bool = False
+    prefer_popular_color_regular_cards: bool = False
     color_density: bool = False
     preserve_wildcards: bool = False
 
@@ -64,11 +137,48 @@ class PlayerStrategyConfig:
             parts.append("most_popular_color")
         if self.prefer_stop:
             parts.append("prefer_stop")
+        if self.prefer_popular_color_regular_cards:
+            parts.append("prefer_popular_color_regular_cards")
         if self.color_density:
             parts.append("color_density")
         if self.preserve_wildcards:
             parts.append("preserve_wildcards")
         return "+".join(parts)
+
+
+@dataclass
+class LossTrace:
+    """Compact diagnostics for the player that lost a completed game."""
+    losing_player: int
+    winning_player: int
+    event_count: int
+    loser_final_hand_size: int
+    winner_final_hand_size: int
+    final_hand_sizes: Dict[int, int]
+    loser_draw_count: int
+    winner_draw_count: int
+    draw_counts: Dict[int, int]
+    play_counts: Dict[int, int]
+    loser_initial_hand_composition: Dict[str, Any]
+    winner_initial_hand_composition: Dict[str, Any]
+    terminal_events: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "losing_player": self.losing_player,
+            "winning_player": self.winning_player,
+            "event_count": self.event_count,
+            "loser_final_hand_size": self.loser_final_hand_size,
+            "winner_final_hand_size": self.winner_final_hand_size,
+            "final_hand_sizes": self.final_hand_sizes,
+            "loser_draw_count": self.loser_draw_count,
+            "winner_draw_count": self.winner_draw_count,
+            "draw_counts": self.draw_counts,
+            "play_counts": self.play_counts,
+            "loser_initial_hand_composition": self.loser_initial_hand_composition,
+            "winner_initial_hand_composition": self.winner_initial_hand_composition,
+            "terminal_events": self.terminal_events,
+        }
 
 
 @dataclass
@@ -82,10 +192,15 @@ class GameResult:
     duration_seconds: float = 0.0
     ended_in_deadlock: bool = False
     ended_in_draw: bool = False
+    final_hand_sizes: Dict[int, int] = field(default_factory=dict)
+    draw_counts: Dict[int, int] = field(default_factory=dict)
+    play_counts: Dict[int, int] = field(default_factory=dict)
+    initial_hand_compositions: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+    loss_trace: Optional[LossTrace] = None
     
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
-        return {
+        data = {
             'game_number': self.game_number,
             'seed': self.seed,
             'winner': self.winner,
@@ -94,7 +209,14 @@ class GameResult:
             'duration_seconds': self.duration_seconds,
             'ended_in_deadlock': self.ended_in_deadlock,
             'ended_in_draw': self.ended_in_draw,
+            'final_hand_sizes': self.final_hand_sizes,
+            'draw_counts': self.draw_counts,
+            'play_counts': self.play_counts,
+            'initial_hand_compositions': self.initial_hand_compositions,
         }
+        if self.loss_trace is not None:
+            data['loss_trace'] = self.loss_trace.to_dict()
+        return data
 
 
 @dataclass
@@ -141,6 +263,101 @@ class SimulationStats:
             return 0.0
         wins = self.player_0_wins if player == 0 else self.player_1_wins
         return wins / denom * 100
+
+    @staticmethod
+    def _average(values: List[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    @staticmethod
+    def _distribution(values: List[int]) -> Dict[int, int]:
+        return dict(sorted(Counter(values).items()))
+
+    def player_loss_analysis(self, player: int = 0) -> Dict[str, Any]:
+        """
+        Aggregate diagnostics for games where ``player`` lost.
+
+        This intentionally uses compact per-game metadata rather than full event
+        traces, so large simulation runs remain practical to save and compare.
+        """
+        completed_with_winner = [result for result in self.results if result.winner is not None]
+        losses = [result for result in completed_with_winner if result.winner != player]
+        wins = [result for result in completed_with_winner if result.winner == player]
+
+        event_counts = [result.event_count for result in completed_with_winner]
+        loss_event_counts = [result.event_count for result in losses]
+        win_event_counts = [result.event_count for result in wins]
+
+        player_draws = [result.draw_counts.get(player, 0) for result in completed_with_winner]
+        loss_player_draws = [result.draw_counts.get(player, 0) for result in losses]
+        loss_winner_draws = [
+            result.draw_counts.get(result.winner, 0)
+            for result in losses
+            if result.winner is not None
+        ]
+
+        final_sizes_at_loss = [
+            result.final_hand_sizes[player]
+            for result in losses
+            if player in result.final_hand_sizes
+        ]
+
+        def player_composition(result: GameResult) -> Dict[str, Any]:
+            return result.initial_hand_compositions.get(player, {})
+
+        def condition_stats(predicate) -> Dict[str, Any]:
+            matching_games = [
+                result
+                for result in completed_with_winner
+                if player_composition(result) and predicate(player_composition(result))
+            ]
+            matching_losses = [result for result in matching_games if result.winner != player]
+            return {
+                "games": len(matching_games),
+                "losses": len(matching_losses),
+                "loss_rate": (len(matching_losses) / len(matching_games) * 100)
+                if matching_games
+                else 0.0,
+            }
+
+        initial_composition_conditions = {
+            "no_taki_cards": condition_stats(lambda comp: comp.get("taki_cards", 0) == 0),
+            "has_taki_cards": condition_stats(lambda comp: comp.get("taki_cards", 0) > 0),
+            "multiple_change_color_cards": condition_stats(
+                lambda comp: comp.get("change_color_cards", 0) >= 2
+            ),
+            "has_change_color_card": condition_stats(
+                lambda comp: comp.get("change_color_cards", 0) > 0
+            ),
+            "has_super_taki_card": condition_stats(
+                lambda comp: comp.get("super_taki_cards", 0) > 0
+            ),
+            "no_wildcards": condition_stats(lambda comp: comp.get("wildcard_cards", 0) == 0),
+        }
+
+        decisive_games = len(completed_with_winner)
+        loss_rate = (len(losses) / decisive_games * 100) if decisive_games else 0.0
+        avg_events_all = self._average(event_counts)
+        avg_events_losses = self._average(loss_event_counts)
+
+        return {
+            "player": player,
+            "decisive_games": decisive_games,
+            "losses": len(losses),
+            "loss_rate": loss_rate,
+            "average_events_all_decisive_games": avg_events_all,
+            "average_events_in_losses": avg_events_losses,
+            "average_events_in_wins": self._average(win_event_counts),
+            "loss_event_delta_from_all_average": avg_events_losses - avg_events_all,
+            "loss_event_ratio_to_all_average": (avg_events_losses / avg_events_all)
+            if avg_events_all
+            else 0.0,
+            "average_player_draws_all_decisive_games": self._average(player_draws),
+            "average_player_draws_in_losses": self._average(loss_player_draws),
+            "average_winner_draws_when_player_loses": self._average(loss_winner_draws),
+            "average_final_hand_size_at_loss": self._average(final_sizes_at_loss),
+            "final_hand_size_distribution_at_loss": self._distribution(final_sizes_at_loss),
+            "initial_composition_conditions": initial_composition_conditions,
+        }
     
     def starting_player_advantage(self) -> Dict[str, any]:
         """
@@ -346,6 +563,44 @@ class SimulationStats:
             "",
             f"Average Events per Game: {self.average_events_per_game:.1f}",
         ])
+
+        p0_loss_analysis = self.player_loss_analysis(0)
+        if p0_loss_analysis["losses"] > 0:
+            no_taki = p0_loss_analysis["initial_composition_conditions"]["no_taki_cards"]
+            multi_change = p0_loss_analysis["initial_composition_conditions"]["multiple_change_color_cards"]
+            lines.extend([
+                "",
+                "Player 0 Loss Trace Analysis:",
+                "  Losses: {}/{} ({:.1f}%)".format(
+                    p0_loss_analysis["losses"],
+                    p0_loss_analysis["decisive_games"],
+                    p0_loss_analysis["loss_rate"],
+                ),
+                "  Events in losses: {:.1f} avg vs {:.1f} all games ({:+.1f})".format(
+                    p0_loss_analysis["average_events_in_losses"],
+                    p0_loss_analysis["average_events_all_decisive_games"],
+                    p0_loss_analysis["loss_event_delta_from_all_average"],
+                ),
+                "  P0 draws in losses: {:.1f} avg vs {:.1f} all games; winners drew {:.1f} avg".format(
+                    p0_loss_analysis["average_player_draws_in_losses"],
+                    p0_loss_analysis["average_player_draws_all_decisive_games"],
+                    p0_loss_analysis["average_winner_draws_when_player_loses"],
+                ),
+                "  Final P0 hand size at loss: {:.1f} avg | distribution {}".format(
+                    p0_loss_analysis["average_final_hand_size_at_loss"],
+                    p0_loss_analysis["final_hand_size_distribution_at_loss"],
+                ),
+                "  No-TAKI initial hands: {}/{} losses ({:.1f}% loss rate)".format(
+                    no_taki["losses"],
+                    no_taki["games"],
+                    no_taki["loss_rate"],
+                ),
+                "  Multiple change-color initial hands: {}/{} losses ({:.1f}% loss rate)".format(
+                    multi_change["losses"],
+                    multi_change["games"],
+                    multi_change["loss_rate"],
+                ),
+            ])
         
         # Add starting player advantage analysis if games have varied starting players
         adv = self.starting_player_advantage()
@@ -425,6 +680,10 @@ class SimulationStats:
             'deadlocks': self.deadlocks,
             'average_events_per_game': self.average_events_per_game,
             'starting_player_advantage': self.starting_player_advantage(),
+            'loss_analysis_by_player': {
+                '0': self.player_loss_analysis(0),
+                '1': self.player_loss_analysis(1),
+            },
             'results': [r.to_dict() for r in self.results]
         }
     
@@ -443,6 +702,12 @@ class SimulationListener:
         self.winner = None
         self.ended_in_deadlock = False
         self.ended_in_draw = False
+        self.pending_deal_player: Optional[int] = None
+        self.game_started = False
+        self.hands: Dict[int, List[str]] = {0: [], 1: []}
+        self.initial_hands: Dict[int, List[str]] = {0: [], 1: []}
+        self.draw_counts: Dict[int, int] = {0: 0, 1: 0}
+        self.play_counts: Dict[int, int] = {0: 0, 1: 0}
         
     def starting(self, b_program): pass
     def started(self, b_program): pass
@@ -454,6 +719,7 @@ class SimulationListener:
     def event_selected(self, b_program, event):
         """Record each selected event."""
         self.events.append(event.name)
+        self._track_hand_state(event.name)
         
         # Check if this is a winning event
         if event.name == "p_0_no_more_cards":
@@ -480,6 +746,109 @@ class SimulationListener:
     def get_event_count(self) -> int:
         """Return the total number of events that occurred."""
         return len(self.events)
+
+    def get_final_hand_sizes(self) -> Dict[int, int]:
+        return {player: len(cards) for player, cards in self.hands.items()}
+
+    def get_initial_hand_compositions(self) -> Dict[int, Dict[str, Any]]:
+        return {
+            player: summarize_card_composition(cards)
+            for player, cards in self.initial_hands.items()
+        }
+
+    def get_draw_counts(self) -> Dict[int, int]:
+        return dict(self.draw_counts)
+
+    def get_play_counts(self) -> Dict[int, int]:
+        return dict(self.play_counts)
+
+    def build_loss_trace(self, winner: Optional[int], terminal_event_count: int = 20) -> Optional[LossTrace]:
+        if winner is None:
+            return None
+
+        losing_player = 1 - winner
+        final_hand_sizes = self.get_final_hand_sizes()
+        initial_hand_compositions = self.get_initial_hand_compositions()
+
+        return LossTrace(
+            losing_player=losing_player,
+            winning_player=winner,
+            event_count=self.get_event_count(),
+            loser_final_hand_size=final_hand_sizes.get(losing_player, 0),
+            winner_final_hand_size=final_hand_sizes.get(winner, 0),
+            final_hand_sizes=final_hand_sizes,
+            loser_draw_count=self.draw_counts.get(losing_player, 0),
+            winner_draw_count=self.draw_counts.get(winner, 0),
+            draw_counts=self.get_draw_counts(),
+            play_counts=self.get_play_counts(),
+            loser_initial_hand_composition=initial_hand_compositions.get(losing_player, {}),
+            winner_initial_hand_composition=initial_hand_compositions.get(winner, {}),
+            terminal_events=self.events[-terminal_event_count:],
+        )
+
+    def _track_hand_state(self, event_name: str):
+        if event_name == "start_game":
+            self.game_started = True
+            return
+
+        deal_to_player_match = DEAL_TO_PLAYER_RE.match(event_name)
+        if deal_to_player_match is not None:
+            self.pending_deal_player = int(deal_to_player_match.group(1))
+            self.hands.setdefault(self.pending_deal_player, [])
+            self.initial_hands.setdefault(self.pending_deal_player, [])
+            self.draw_counts.setdefault(self.pending_deal_player, 0)
+            self.play_counts.setdefault(self.pending_deal_player, 0)
+            return
+
+        if event_name.startswith("deal_p_"):
+            if self.pending_deal_player is not None:
+                card_name = event_name.removeprefix("deal_p_")
+                self.hands[self.pending_deal_player].append(card_name)
+                if not self.game_started:
+                    self.initial_hands[self.pending_deal_player].append(card_name)
+                self.pending_deal_player = None
+            return
+
+        draw_match = re.match(r"^p_(\d+)_draw_card$", event_name)
+        if draw_match is not None:
+            player = int(draw_match.group(1))
+            self.draw_counts[player] = self.draw_counts.get(player, 0) + 1
+            return
+
+        played_card_match = PLAYER_CARD_RE.match(event_name)
+        if played_card_match is not None:
+            player = int(played_card_match.group(1))
+            card_name = played_card_match.group(2)
+            self.play_counts[player] = self.play_counts.get(player, 0) + 1
+            if card_name in self.hands.get(player, []):
+                self.hands[player].remove(card_name)
+
+
+def build_game_result(
+    game_number: int,
+    seed: int,
+    winner: Optional[int],
+    listener: SimulationListener,
+    actual_starting_player: int,
+    duration_seconds: float,
+    ended_in_deadlock: bool,
+    ended_in_draw: bool,
+) -> GameResult:
+    return GameResult(
+        game_number=game_number,
+        seed=seed,
+        winner=winner,
+        event_count=listener.get_event_count(),
+        starting_player=actual_starting_player,
+        duration_seconds=duration_seconds,
+        ended_in_deadlock=ended_in_deadlock,
+        ended_in_draw=ended_in_draw,
+        final_hand_sizes=listener.get_final_hand_sizes(),
+        draw_counts=listener.get_draw_counts(),
+        play_counts=listener.get_play_counts(),
+        initial_hand_compositions=listener.get_initial_hand_compositions(),
+        loss_trace=listener.build_loss_trace(winner),
+    )
 
 
 def build_game_schedule(
@@ -566,6 +935,8 @@ def _apply_strategy_config(bthreads: list, index: int, config: PlayerStrategyCon
     if config.prefer_stop:
         for color in COLORS:
             bthreads.append(prefer_stop_over_regular_cards_strategy(index, color))
+    if config.prefer_popular_color_regular_cards:
+        bthreads.append(prefer_popular_color_regular_cards_strategy(index, num_cards))
     if config.color_density:
         bthreads.append(color_density_card_strategy(index, num_cards))
     if config.preserve_wildcards:
@@ -785,12 +1156,12 @@ def run_single_game_basic_vs_external(
             print(f"Game {game_number} (seed={seed}) ended in a draw.")
 
         duration = (end_time - start_time).total_seconds()
-        return GameResult(
+        return build_game_result(
             game_number=game_number,
             seed=seed,
             winner=winner,
-            event_count=listener.get_event_count(),
-            starting_player=actual_starting_player,
+            listener=listener,
+            actual_starting_player=actual_starting_player,
             duration_seconds=duration,
             ended_in_deadlock=ended_in_deadlock,
             ended_in_draw=ended_in_draw,
@@ -1020,12 +1391,12 @@ def run_single_game_basic_vs_strategy(
             print(f"Game {game_number} (seed={seed}) ended in a draw.")
 
         duration = (end_time - start_time).total_seconds()
-        return GameResult(
+        return build_game_result(
             game_number=game_number,
             seed=seed,
             winner=winner,
-            event_count=listener.get_event_count(),
-            starting_player=actual_starting_player,
+            listener=listener,
+            actual_starting_player=actual_starting_player,
             duration_seconds=duration,
             ended_in_deadlock=ended_in_deadlock,
             ended_in_draw=ended_in_draw,
@@ -1218,14 +1589,13 @@ def run_single_game(
         if ended_in_draw:
             print(f"Game {game_number} (seed={seed}) ended in a draw.")
 
-        # Create result
         duration = (end_time - start_time).total_seconds()
-        result = GameResult(
+        result = build_game_result(
             game_number=game_number,
             seed=seed,
             winner=winner,
-            event_count=listener.get_event_count(),
-            starting_player=actual_starting_player,
+            listener=listener,
+            actual_starting_player=actual_starting_player,
             duration_seconds=duration,
             ended_in_deadlock=ended_in_deadlock,
             ended_in_draw=ended_in_draw,
@@ -1423,6 +1793,8 @@ def run_bp_vs_external_player_simulation():
         change_color=True,
         most_popular_color=True,
         prefer_stop=True,
+        color_density=True,
+        preserve_wildcards=True,
     )
 
     stats = run_simulation_basic_vs_external(
@@ -1486,25 +1858,23 @@ def run_bp_vs_strategy_player_simulation():
 
 def run_players_simulation():
     num_seed_pairs = 10000
-
+  
     player_0_config = PlayerStrategyConfig(
-        base_strategy="taki_and_super_taki",
-        block_super_taki=True,
-        change_color=True,
-        most_popular_color=True,
-        prefer_stop=False,
-        color_density=True,
-        preserve_wildcards=True,
-    )
-    
-    player_1_config = PlayerStrategyConfig(
         base_strategy="basic",
         block_super_taki=False,
         change_color=False,
         most_popular_color=False,
         prefer_stop=False,
-        color_density=False,
-        preserve_wildcards=False,
+        prefer_popular_color_regular_cards=False,
+    )
+
+    player_1_config = PlayerStrategyConfig(
+        base_strategy="taki_and_super_taki",
+        block_super_taki=True,
+        change_color=True,
+        most_popular_color=True,
+        prefer_stop=True,
+        prefer_popular_color_regular_cards=True,
     )
 
     stats = run_simulation(
