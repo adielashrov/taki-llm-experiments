@@ -7,8 +7,7 @@ review for ICECCS 2026.
 
 It contains the code versions, experimental configurations, prompts, generated
 strategies, and simulation setup used to produce the results reported in the
-paper. Use this repository to reproduce the paper's experiments under the
-evaluated conditions.
+paper.
 
 The main TAKI implementation is maintained in
 [`bp-taki`](https://github.com/adielashrov/bp-taki). That repository contains
