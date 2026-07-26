@@ -1,18 +1,40 @@
-This package provides the interface for implementing a TAKI-playing agent that integrates with the BP-TAKI bridge.
+# taki-llm-experiments
 
-It models a reduced TAKI variant. Supported cards: NUMBER, STOP, CHANGE_COLOR, TAKI, SUPER_TAKI.
+This repository provides the replication package for the experiments presented
+in the paper *“From Domain Knowledge to Composable Reactive Code:
+LLM-Assisted Development with Scenario-Based Programming”*, currently under
+review for ICECCS 2026.
 
-## Key classes
+It contains the code versions, experimental configurations, prompts, generated
+strategies, and simulation setup used to produce the results reported in the
+paper. Use this repository to reproduce the paper’s experiments under the
+evaluated conditions.
 
-**`TakiAgent`** — abstract base class for all agents. Implement `get_action` to create your own agent.
+The main TAKI implementation is maintained in
+[`bp-taki`](https://github.com/adielashrov/bp-taki). That repository contains
+the evolving implementation of the TAKI card game in Scenario-Based
+Programming (SBP), also known as Behavioral Programming (BP), together with
+additional hand-authored strategies and implementation extensions.
 
-**`PythonAgent`** — a minimal concrete agent that picks the first legal-looking card from its hand. Intended as a placeholder and starting point for custom implementations.
+Because the main implementation continues to evolve, the experiments reported
+in the paper should be reproduced using the artifacts and configurations stored
+in this repository.
 
-**`TakiGame`** — abstract interface for a game engine. Implement this if you want to run standalone Python episodes outside of BP.
+## Repository contents
 
-## Implementing an agent
+This replication package includes:
 
-Subclass `TakiAgent` and implement `get_action`:
+* the TAKI implementation version used in the experiments;
+* the Python-agent interface used by the generated Python strategies;
+* the prompts and context configurations provided to the target LLM;
+* the generated Python and SBP strategies;
+* the hand-authored SBP strategy examples;
+* the simulation and evaluation scripts used to produce the reported results.
+
+## Python-agent interface
+
+The `python_taki_api` package defines the interface used by Python-based TAKI
+agents. A custom agent subclasses `TakiAgent` and implements `get_action`:
 
 ```python
 from python_taki_api import TakiAgent
@@ -22,29 +44,14 @@ class MyAgent(TakiAgent):
         ...
 ```
 
-`get_action` receives a flat `dict[str, str]` and returns an action name string.
+The implemented game variant supports number cards, Stop, Change Color, TAKI,
+and Super TAKI.
 
-### Observation keys
+For the complete observation schema, action-name format, and implementation
+instructions, see
+[`docs/getting-started.md`](./docs/getting-started.md).
 
-| Key | Values |
-|-----|--------|
-| `player_index` | `"0"`, `"1"`, … |
-| `phase` | `"turn"` \| `"taki_sequence"` \| `"change_color"` \| `"terminal"` |
-| `hand` | comma-separated card names, e.g. `"card_4_blue,stop_red"` |
-| `top_card` | descriptor e.g. `"card_3_blue"`, or `""` at game start |
-| `active_color` | `"red"` \| `"blue"` \| `"green"` \| `""` (empty during CHANGE_COLOR) |
-| `rule_mode` | `"match_color_or_type"` \| `"color_only"` \| `"taki"` |
-| `taki_color` | `"red"` \| `"blue"` \| `"green"` \| `""` (non-empty only during TAKI_SEQUENCE) |
+## Paper and supplementary material
 
-### Action name format
-
-| Card | Format | Example |
-|------|--------|---------|
-| Number card | `card_{number}_{color}` | `card_4_blue` |
-| Stop | `stop_{color}` | `stop_red` |
-| TAKI | `taki_{color}` | `taki_green` |
-| Super TAKI | `super_taki` | |
-| Change color | `change_color` | |
-| Draw card | `draw_card` | |
-| Close TAKI | `closed_taki` | |
-| Select color | `selected_{color}` | `selected_blue` |
+The paper and its supplementary material are available in the
+[`paper/`](./paper) directory.
