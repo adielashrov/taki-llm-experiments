@@ -1,13 +1,13 @@
 # taki-llm-experiments
 
 This repository provides the replication package for the experiments presented
-in the paper *“From Domain Knowledge to Composable Reactive Code:
-LLM-Assisted Development with Scenario-Based Programming”*, currently under
+in the paper "From Domain Knowledge to Composable Reactive Code:
+LLM-Assisted Development with Scenario-Based Programming", currently under
 review for ICECCS 2026.
 
 It contains the code versions, experimental configurations, prompts, generated
 strategies, and simulation setup used to produce the results reported in the
-paper. Use this repository to reproduce the paper’s experiments under the
+paper. Use this repository to reproduce the paper's experiments under the
 evaluated conditions.
 
 The main TAKI implementation is maintained in
@@ -24,12 +24,12 @@ in this repository.
 
 This replication package includes:
 
-* the TAKI implementation version used in the experiments;
-* the Python-agent interface used by the generated Python strategies;
-* the prompts and context configurations provided to the target LLM;
-* the generated Python and SBP strategies;
-* the hand-authored SBP strategy examples;
-* the simulation and evaluation scripts used to produce the reported results.
+- the TAKI implementation version used in the experiments;
+- the Python-agent interface used by the generated Python strategies;
+- the prompts and context configurations provided to the target LLM;
+- the generated Python and SBP strategies;
+- the hand-authored SBP strategy examples;
+- the simulation and evaluation scripts used to produce the reported results.
 
 ## Python-agent interface
 
@@ -45,13 +45,12 @@ class MyAgent(TakiAgent):
 ```
 
 The implemented game variant supports number cards, Stop, Change Color, TAKI,
-and Super TAKI.
-
-For the complete observation schema, action-name format, and implementation
-instructions, see
-[`docs/getting-started.md`](./docs/getting-started.md).
+and Super TAKI. The complete observation schema, action-name format, and
+agent-implementation instructions are provided in
+[`python_taki_api/readme.md`](https://github.com/adielashrov/taki-llm-experiments/blob/main/python_taki_api/readme.md).
 
 ## Paper and supplementary material
 
 The paper and its supplementary material are available in the
-[`paper/`](./paper) directory.
+[`paper/`](https://github.com/adielashrov/taki-llm-experiments/blob/main/paper)
+directory.
