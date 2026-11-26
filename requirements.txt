@@ -1,0 +1,2 @@
+# Tested with Python 3.9.5. BPpy is included in code/bppy; do not install it from PyPI.
+z3-solver==4.16.0.0

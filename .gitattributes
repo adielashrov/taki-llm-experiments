@@ -1,0 +1,2 @@
+# Keep result files byte for byte, so they match the checksums in manifest.csv
+results/* -text

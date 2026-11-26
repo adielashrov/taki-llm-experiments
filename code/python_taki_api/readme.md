@@ -58,4 +58,4 @@ class MyAgent(TakiAgent):
 
 This file documents the agent interface only. For instructions on
 reproducing the experiments reported in the paper, see the top-level
-[README](../README.md).
+[README](../../README.md).
